@@ -1,0 +1,260 @@
+### FILE: settings.gradle.kts
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+rootProject.name = "vpnapp"
+include(":app")
+### FILE: build.gradle.kts
+plugins {
+    id("com.android.application") version "8.5.2" apply false
+    id("org.jetbrains.kotlin.android") version "2.0.0" apply false
+    id("org.jetbrains.kotlin.plugin.compose") version "2.0.0" apply false
+}
+### FILE: gradle.properties
+org.gradle.jvmargs=-Xmx2g
+android.useAndroidX=true
+### FILE: app/build.gradle.kts
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
+}
+
+android {
+    namespace = "com.example.vpnapp"
+    compileSdk = 34
+
+    defaultConfig {
+        applicationId = "com.example.vpnapp"
+        minSdk = 29
+        targetSdk = 34
+        versionCode = 1
+        versionName = "1.0"
+    }
+
+    buildFeatures {
+        compose = true
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+}
+
+dependencies {
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.activity:activity-compose:1.9.0")
+    implementation(platform("androidx.compose:compose-bom:2024.06.00"))
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("com.wireguard.android:tunnel:1.0.20230706")
+}
+### FILE: app/src/main/AndroidManifest.xml
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <application
+        android:label="VPN App"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".MyVpnService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="vpn" />
+        </service>
+
+    </application>
+</manifest>
+### FILE: app/src/main/java/com/example/vpnapp/MyVpnService.kt
+package com.example.vpnapp
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.content.Intent
+import android.net.VpnService
+import android.os.Build
+import android.os.ParcelFileDescriptor
+import androidx.core.app.NotificationCompat
+
+class MyVpnService : VpnService() {
+
+    private var tunInterface: ParcelFileDescriptor? = null
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_DISCONNECT) {
+            disconnect()
+            return START_NOT_STICKY
+        }
+        connect()
+        return START_STICKY
+    }
+
+    private fun connect() {
+        startForegroundWithNotification()
+
+        // FILL: الـ Address والـ DNS لازم يتطابقوا مع الـ Interface في الـ WireGuard config بتاعك
+        val builder = Builder()
+            .setSession("MyVPN")
+            .addAddress("10.0.0.2", 32)
+            .addRoute("0.0.0.0", 0)
+            .addDnsServer("10.0.0.1")
+            .setMtu(1420)
+
+        builder.setBlocking(true)
+
+        tunInterface = builder.establish()
+        // TODO-ربط: هنا هنمرر tunInterface.fd لـ WireGuard tunnel لما نحط الـ config
+    }
+
+    private fun disconnect() {
+        tunInterface?.close()
+        tunInterface = null
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    private fun startForegroundWithNotification() {
+        val channelId = "vpn_channel"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(channelId, "VPN", NotificationManager.IMPORTANCE_LOW)
+            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        }
+        val notification: Notification = NotificationCompat.Builder(this, channelId)
+            .setContentTitle("VPN متصل")
+            .setSmallIcon(android.R.drawable.ic_lock_lock)
+            .setOngoing(true)
+            .build()
+        startForeground(1, notification)
+    }
+
+    companion object {
+        const val ACTION_DISCONNECT = "com.example.vpnapp.DISCONNECT"
+    }
+}
+### FILE: app/src/main/java/com/example/vpnapp/MainActivity.kt
+package com.example.vpnapp
+
+import android.app.Activity
+import android.content.Intent
+import android.net.VpnService
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+
+class MainActivity : ComponentActivity() {
+
+    private var connected by mutableStateOf(false)
+
+    private val permissionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            startService(Intent(this, MyVpnService::class.java))
+            connected = true
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent {
+            MaterialTheme(colorScheme = darkColorScheme()) {
+                VpnScreen(
+                    onStart = { startVpn() },
+                    onStop = { stopVpn() }
+                )
+            }
+        }
+    }
+
+    private fun startVpn() {
+        val intent = VpnService.prepare(this)
+        if (intent != null) {
+            permissionLauncher.launch(intent)
+        } else {
+            startService(Intent(this, MyVpnService::class.java))
+            connected = true
+        }
+    }
+
+    private fun stopVpn() {
+        startService(Intent(this, MyVpnService::class.java).apply {
+            action = MyVpnService.ACTION_DISCONNECT
+        })
+        connected = false
+    }
+
+    @Composable
+    private fun VpnScreen(onStart: () -> Unit, onStop: () -> Unit) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xFF0B0F19)),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    text = if (connected) "متصل" else "غير متصل",
+                    color = Color.White,
+                    fontSize = 22.sp
+                )
+                Spacer(Modifier.height(32.dp))
+                Button(
+                    onClick = { if (connected) onStop() else onStart() },
+                    modifier = Modifier.size(160.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (connected) Color(0xFFE53935) else Color(0xFF00C853)
+                    )
+                ) {
+                    Text(if (connected) "فصل" else "اتصال", fontSize = 20.sp)
+                }
+            }
+        }
+    }
+}
